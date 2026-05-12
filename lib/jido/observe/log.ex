@@ -15,7 +15,7 @@ defmodule Jido.Observe.Log do
 
       # Lazy - message only computed if debug is enabled
       Log.log_lazy(:debug, fn ->
-        "Processing #{expensive_calculation()} with #{length(large_list)} items"
+        "Processing \#{expensive_calculation()} with \#{length(large_list)} items"
       end)
 
       # Eager - always evaluated (use for simple static strings)
@@ -43,7 +43,7 @@ defmodule Jido.Observe.Log do
 
       # Lazy logging - message computed only if enabled
       Log.log_lazy(:debug, fn ->
-        "Details: #{inspect(large_data, limit: 100)}"
+        "Details: \#{inspect(large_data, limit: 100)}"
       end, agent_id: agent.id)
   """
 
@@ -130,12 +130,12 @@ defmodule Jido.Observe.Log do
       # Only calls expensive_operation/0 if debug is enabled
       Log.log_lazy(:debug, fn ->
         result = expensive_operation()
-        "Result: #{result}"
+        "Result: \#{result}"
       end)
 
       # Safe for potentially large data
       Log.log_lazy(:debug, fn ->
-        "Data: #{inspect(large_map, limit: 50)}"
+        "Data: \#{inspect(large_map, limit: 50)}"
       end, request_id: req.id)
 
       # With safe_inspect from Jido.Observe
