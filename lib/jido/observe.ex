@@ -47,10 +47,10 @@ defmodule Jido.Observe do
   Use lazy logging functions to avoid evaluating messages when the log level is disabled:
 
       # Lazy - message only computed if debug is enabled
-      Jido.Observe.debug(fn -> "Processing: #{expensive_call()}" end)
+      Jido.Observe.debug(fn -> "Processing: \#{expensive_call()}" end)
 
       # Lazy with metadata
-      Jido.Observe.info(fn -> "Step #{step} complete" end, agent_id: agent.id, step: step)
+      Jido.Observe.info(fn -> "Step \#{step} complete" end, agent_id: agent.id, step: step)
 
       # Eager for simple static strings
       Jido.Observe.info("Static message")
@@ -61,7 +61,7 @@ defmodule Jido.Observe do
 
       # Automatically truncated to 1000 chars (configurable)
       Jido.Observe.debug(fn ->
-        "Response: #{safe_inspect(api_response, limit: 200)}"
+        "Response: \#{safe_inspect(api_response, limit: 200)}"
       end)
 
       # With label prefix
@@ -517,7 +517,7 @@ defmodule Jido.Observe do
 
       # Lazy - preferred for dynamic content
       Jido.Observe.debug(fn ->
-        "Processing #{agent.id} with #{length(actions)} actions"
+        "Processing \#{agent.id} with \#{length(actions)} actions"
       end)
 
       # Eager - acceptable for static strings
@@ -536,7 +536,7 @@ defmodule Jido.Observe do
 
   ## Examples
 
-      Jido.Observe.info(fn -> "Agent #{id} started" end)
+      Jido.Observe.info(fn -> "Agent \#{id} started" end)
 
       Jido.Observe.info("Workflow complete", workflow_id: workflow.id)
   """
@@ -551,7 +551,7 @@ defmodule Jido.Observe do
   ## Examples
 
       Jido.Observe.warning(fn ->
-        "Slow operation: #{duration}ms exceeds threshold"
+        "Slow operation: \#{duration}ms exceeds threshold"
       end)
   """
   @spec warning((-> String.t()) | String.t(), keyword()) :: :ok
@@ -565,7 +565,7 @@ defmodule Jido.Observe do
   ## Examples
 
       Jido.Observe.error(fn ->
-        "Action #{action.name} failed: #{Exception.message(error)}"
+        "Action \#{action.name} failed: \#{Exception.message(error)}"
       end)
   """
   @spec error((-> String.t()) | String.t(), keyword()) :: :ok
