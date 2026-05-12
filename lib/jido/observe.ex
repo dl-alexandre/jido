@@ -12,6 +12,9 @@ defmodule Jido.Observe do
   - Automatic correlation ID enrichment from `Jido.Tracing.Context`
   - Pluggable tracer callbacks via `Jido.Observe.Tracer`
   - Threshold-based logging via `Jido.Observe.Log`
+  - **Lazy logging** - messages only evaluated when level is enabled
+  - **Safe inspection** - automatic truncation of large data structures
+  - **Sensitive data redaction** - automatic redaction of API keys, tokens, passwords
 
   ## Correlation Tracing Integration
 
@@ -30,12 +33,51 @@ defmodule Jido.Observe do
       config :jido, :observability,
         log_level: :info,
         tracer: Jido.Observe.NoopTracer,
-        tracer_failure_mode: :warn
+        tracer_failure_mode: :warn,
+        redact_sensitive: true,
+        inspect_limit: 1000
 
   `:tracer_failure_mode` controls tracer callback errors:
 
   - `:warn` (default) isolates tracer failures and logs warnings
   - `:strict` raises immediately on tracer callback failures
+
+  ## Lazy Logging API
+
+  Use lazy logging functions to avoid evaluating messages when the log level is disabled:
+
+      # Lazy - message only computed if debug is enabled
+      Jido.Observe.debug(fn -> "Processing: #{expensive_call()}" end)
+
+      # Lazy with metadata
+      Jido.Observe.info(fn -> "Step #{step} complete" end, agent_id: agent.id, step: step)
+
+      # Eager for simple static strings
+      Jido.Observe.info("Static message")
+
+  ## Safe Inspection
+
+  Use `safe_inspect/2` instead of raw `inspect/1` for logging data structures:
+
+      # Automatically truncated to 1000 chars (configurable)
+      Jido.Observe.debug(fn ->
+        "Response: #{safe_inspect(api_response, limit: 200)}"
+      end)
+
+      # With label prefix
+      safe_inspect(data, label: "API response", limit: 500)
+      # => "API response: %{key: value...}"
+
+  ## Redaction
+
+  Sensitive data is automatically redacted when logging:
+
+      # Keys like api_key, token, password are automatically redacted
+      %{api_key: "secret", user: "alice"}
+      # Logs as: %{api_key: "[REDACTED]", user: "alice"}
+
+      # Manual redaction
+      Jido.Observe.redact(sensitive_value, force_redact: true)
 
   ## Usage
 
@@ -91,6 +133,14 @@ defmodule Jido.Observe do
   Metadata should be small, identifying data (IDs, step numbers, model names), not full
   prompts/responses. For large payloads, include derived measurements (`prompt_tokens`,
   `prompt_size_bytes`) rather than the raw content.
+
+  ## Observability Policy
+
+  See `guides/observability_policy.md` for the full policy on:
+  - Telemetry event taxonomy and metadata namespace
+  - Redaction and truncation policies
+  - Canonical helper API for jido_* repos
+  - CI guard for lazy logging enforcement
   """
 
   require Logger
@@ -388,6 +438,189 @@ defmodule Jido.Observe do
       value
     end
   end
+
+  @doc """
+  Safe inspect with truncation for large data structures.
+
+  Prevents enormous log lines from causing performance issues or
+  consuming excessive storage. Always use this instead of raw `inspect/1`
+  for logging potentially large data.
+
+  ## Options
+
+  - `:limit` - Maximum string length before truncation (default: 1000)
+  - `:label` - Optional label prefix for the output
+  - `:opts` - Additional options passed to `inspect/2`
+
+  ## Examples
+
+      safe_inspect(large_map, limit: 500)
+      # => "%{key: value, ...}" (truncated at 500 chars)
+
+      safe_inspect(data, label: "API response")
+      # => "API response: %{key: value}"
+
+      # Handles nested structures
+      safe_inspect(%{nested: %{deep: "value"}}, limit: 100)
+      # => "%{nested: %{deep: \"value\"}}"
+
+      # Handles binaries safely
+      safe_inspect(<<0, 1, 2, 3, ...>>, limit: 50)
+      # => "<<0, 1, 2...>>" (truncated)
+
+  ## Redaction Integration
+
+  To redact sensitive values during inspection:
+
+      safe_inspect(%{api_key: "secret"}, redact: true)
+      # => "%{api_key: \"[REDACTED]\"}"
+  """
+  @spec safe_inspect(term(), keyword()) :: String.t()
+  def safe_inspect(term, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 1000)
+    label = Keyword.get(opts, :label)
+    redact_enabled = Keyword.get(opts, :redact, false)
+    inspect_opts = Keyword.get(opts, :opts, [limit: :infinity, printable_limit: :infinity, width: 80])
+
+    inspected =
+      try do
+        inspect(term, inspect_opts)
+      rescue
+        _ -> "#<inspect_failed>"
+      end
+
+    string = to_string(inspected)
+    truncated = truncate_string(string, limit)
+
+    result =
+      if label do
+        "#{label}: #{truncated}"
+      else
+        truncated
+      end
+
+    if redact_enabled do
+      redact_in_string(result)
+    else
+      result
+    end
+  end
+
+  # --- Lazy logging helpers (canonical API) ---
+
+  @doc """
+  Lazy debug logging. Message computed only if level enabled.
+
+  Accepts either a zero-arity function (lazy) or a string (eager for simple cases).
+
+  ## Examples
+
+      # Lazy - preferred for dynamic content
+      Jido.Observe.debug(fn ->
+        "Processing #{agent.id} with #{length(actions)} actions"
+      end)
+
+      # Eager - acceptable for static strings
+      Jido.Observe.debug("Static message")
+
+      # With metadata
+      Jido.Observe.debug(fn -> "Step complete" end, step: 3, agent_id: agent.id)
+  """
+  @spec debug((-> String.t()) | String.t(), keyword()) :: :ok
+  def debug(message_fun, metadata \\ []) when is_function(message_fun, 0) or is_binary(message_fun) do
+    lazy_log(:debug, message_fun, metadata)
+  end
+
+  @doc """
+  Lazy info logging. Message computed only if level enabled.
+
+  ## Examples
+
+      Jido.Observe.info(fn -> "Agent #{id} started" end)
+
+      Jido.Observe.info("Workflow complete", workflow_id: workflow.id)
+  """
+  @spec info((-> String.t()) | String.t(), keyword()) :: :ok
+  def info(message_fun, metadata \\ []) when is_function(message_fun, 0) or is_binary(message_fun) do
+    lazy_log(:info, message_fun, metadata)
+  end
+
+  @doc """
+  Lazy warning logging. Message computed only if level enabled.
+
+  ## Examples
+
+      Jido.Observe.warning(fn ->
+        "Slow operation: #{duration}ms exceeds threshold"
+      end)
+  """
+  @spec warning((-> String.t()) | String.t(), keyword()) :: :ok
+  def warning(message_fun, metadata \\ []) when is_function(message_fun, 0) or is_binary(message_fun) do
+    lazy_log(:warning, message_fun, metadata)
+  end
+
+  @doc """
+  Lazy error logging. Message computed only if level enabled.
+
+  ## Examples
+
+      Jido.Observe.error(fn ->
+        "Action #{action.name} failed: #{Exception.message(error)}"
+      end)
+  """
+  @spec error((-> String.t()) | String.t(), keyword()) :: :ok
+  def error(message_fun, metadata \\ []) when is_function(message_fun, 0) or is_binary(message_fun) do
+    lazy_log(:error, message_fun, metadata)
+  end
+
+  # --- Private helpers ---
+
+  defp lazy_log(level, message_fun, metadata) when is_function(message_fun, 0) do
+    # Only evaluate if level is enabled
+    if Log.level_enabled?(level) do
+      message = message_fun.()
+      Log.log(level, message, metadata)
+    end
+
+    :ok
+  end
+
+  defp lazy_log(level, message, metadata) when is_binary(message) do
+    # For backward compatibility with eager strings
+    Log.log(level, message, metadata)
+  end
+
+  defp truncate_string(str, limit) when is_binary(str) and is_integer(limit) and limit > 0 do
+    if byte_size(str) > limit do
+      binary_part(str, 0, limit) <> "...[truncated]"
+    else
+      str
+    end
+  end
+
+  defp truncate_string(other, _limit) do
+    inspect(other)
+  end
+
+  # Simple redaction patterns for common sensitive keys in inspect output
+  @sensitive_patterns [
+    ~r/\b(api_key|api_secret|token|access_token|refresh_token|password|secret|authorization|auth_header|private_key|credential)\s*:\s*"[^"]*"/i,
+    ~r/\b(api_key|api_secret|token|access_token|refresh_token|password|secret|authorization|auth_header|private_key|credential)\s*=>\s*"[^"]*"/i
+  ]
+
+  defp redact_in_string(string) when is_binary(string) do
+    Enum.reduce(@sensitive_patterns, string, fn pattern, acc ->
+      Regex.replace(pattern, acc, fn match ->
+        # Extract the key part
+        case Regex.run(~r/^(\w+)\s*[:=>]/, match) do
+          [_, key] -> "#{key}: \"[REDACTED]\""
+          _ -> match
+        end
+      end)
+    end)
+  end
+
+  defp redact_in_string(other), do: other
 
   defp with_span_legacy(event_prefix, metadata, fun) do
     span_ctx = start_span(event_prefix, metadata)
